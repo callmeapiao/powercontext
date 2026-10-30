@@ -651,6 +651,8 @@ async def open_builtin_runtime(
                 scheduled_source_runner=scheduled_source_runner,
                 scheduled_experience_runner=scheduled_experience_runner,
                 remote_ingestion=contexts,
+                database=contexts.database,
+                source_repository=contexts.repositories.sources,
             )
         )
         runtime.artifact_processing_supervisor = await resources.enter_async_context(
