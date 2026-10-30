@@ -592,9 +592,8 @@ async def search_pdf_pages(memory: ScopedPageMemory, question: str, limit: int =
       evidence. The terms that are rare across the retrieved pages weigh more,
       and the position a page holds in the ranking of the whole question weighs
       with it, because that ranking asks for every term of the question at
-      once.
-      so a page that carries a distinctive concept outranks a page that merely
-      repeats a common one.
+      once, so a page that carries a distinctive concept outranks a page that
+      merely repeats a common one.
 
     The scope may hold several filings, so the company name of the question
     locates the filing first. The name is matched as a whole phrase, because a
