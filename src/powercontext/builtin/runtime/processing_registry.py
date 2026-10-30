@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 from powercontext.builtin.artifacts.experience import EXPERIENCE_INCUBATION_CURSOR_NAME
 from powercontext.builtin.artifacts.profile.models import PROFILE_SOURCE_WINDOW_BINDING
@@ -36,6 +36,22 @@ RECOMMENDED_PROCESSING_SCHEDULE_SECONDS = {
 }
 RECOMMENDED_PROFILE_CRON = "0 2 * * *"
 RECOMMENDED_PROFILE_TIMEZONE = "Asia/Shanghai"
+
+# Families whose admission may start from a pending Source count. Each entry
+# names the public configuration field that owns the threshold.
+SOURCE_COUNT_THRESHOLD_FIELDS: Final[dict[str, str]] = {
+    "memory": "memory_source_count_threshold",
+    "topic-memory": "topic_memory_source_count_threshold",
+}
+
+
+def family_source_count_threshold(config: BuiltinConfig, family: str) -> int | None:
+    """Resolve one Family's optional pending Source count threshold."""
+
+    field = SOURCE_COUNT_THRESHOLD_FIELDS.get(family)
+    if field is None:
+        return None
+    return getattr(config.runtime, field)
 
 
 def processing_capabilities(config: BuiltinConfig) -> tuple[str, ...]:

@@ -144,6 +144,7 @@ from powercontext.builtin.runtime.processing_discovery import SourceProcessingPe
 from powercontext.builtin.runtime.processing_registry import (
     canonical_processing_manifest,
     dream_operations,
+    family_source_count_threshold,
     processing_capabilities,
 )
 from powercontext.builtin.runtime.protocols import RuntimeTracing
@@ -785,6 +786,7 @@ def _artifact_processing_bindings(  # noqa: C901 - validate and assemble one reg
                 if family == "profile" and config.runtime.profile_schedule_enabled
                 else None,
                 timezone=config.runtime.profile_timezone if family == "profile" else "Asia/Shanghai",
+                source_count_threshold=family_source_count_threshold(config, family),
                 pending_provider=None
                 if family == "skill"
                 else SourceProcessingPendingProvider(contexts.database, binding, family),

@@ -67,6 +67,7 @@ from powercontext.builtin.runtime.processing_contracts import (
     ArtifactProcessingWorkerOutcome,
     WorkerEntrypoint,
 )
+from powercontext.builtin.runtime.processing_discovery import count_ready_scopes
 from powercontext.builtin.runtime.protocols import RuntimeTracing
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,7 @@ _DISCOVERY_PAGE_DELAY_SECONDS = 0.01
 _DISCOVERY_TIMEOUT_SECONDS = 2.0
 _SPAWN_SIGTERM_GRACE_SECONDS = 1.0
 _WORKER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+_COUNT_CHECK_INTERVAL_SECONDS = 1.0
 ProcessingKey = tuple[str, str]
 
 
@@ -113,6 +115,9 @@ class ArtifactProcessingBinding:
     cron: str | None = None
     timezone: str = "Asia/Shanghai"
     config_prefix: str | None = None
+    # A positive pending Source count admits one invocation on its own, so the
+    # count condition and the time condition are independent alternatives.
+    source_count_threshold: int | None = None
     pending_provider: ArtifactProcessingPendingProvider | None = None
     # Only automatic admission is filtered; already accepted requests retain
     # their own Worker authorization and domain completion semantics.
@@ -129,6 +134,7 @@ class ArtifactProcessingBinding:
         object.__setattr__(self, "config_prefix", prefix)
         if type(self.max_workers) is not int or self.max_workers < 1:
             raise ValueError("max_workers must be a positive integer")  # noqa: TRY003
+        _require_positive_count_threshold(self.source_count_threshold)
         if self.worker_timeout_seconds <= 0:
             raise ValueError("worker_timeout_seconds must be positive")  # noqa: TRY003
         if self.automatic_processing_interval is not None:
@@ -138,6 +144,13 @@ class ArtifactProcessingBinding:
                 raise ValueError("interval and cron cannot both be enabled")  # noqa: TRY003
         if self.cron is not None:
             CronTrigger.from_crontab(self.cron, timezone=ZoneInfo(self.timezone))
+
+
+def _require_positive_count_threshold(value: int | None) -> None:
+    """Accept only a strict positive integer pending Source count threshold."""
+
+    if value is not None and (type(value) is not int or value < 1):
+        raise ValueError("source_count_threshold must be a positive integer")  # noqa: TRY003
 
 
 class _WorkerResultSender(Protocol):
@@ -401,6 +414,8 @@ class _FamilyState:
     discovery_pending: bool = True
     next_schedule_at: float | None = None
     next_discovery_at: float = 0.0
+    count_scan_after: str | None = None
+    next_count_at: float = 0.0
     automatic_next: bool = False
     overflow_not_before: float = 0.0
     degraded: bool = False
@@ -656,6 +671,48 @@ class ArtifactProcessingSupervisor:
         else:
             await self._discover_requested(state)
             await self._discover_automatic(state)
+        await self._discover_count_triggered(state)
+
+    async def _discover_count_triggered(self, state: _FamilyState) -> None:
+        """Admit scopes whose pending Source count reached the threshold.
+
+        The count starts after the Family's last successful Source cursor, so
+        an accepted but unfinished invocation keeps its own place: a failure
+        never discards pending input and never consumes the successful cursor.
+        """
+
+        threshold = state.binding.source_count_threshold
+        if threshold is None:
+            return
+        capacity = self._fresh_capacity(state)
+        if capacity <= 0:
+            return
+        fence = self._require_current_fence()
+        async with self._database.transaction() as connection:
+            await self._leases.require_fence(connection, fence)
+            page = await count_ready_scopes(
+                connection,
+                binding_name=state.binding.binding_name,
+                threshold=threshold,
+                limit=capacity,
+                after_scope_id=state.count_scan_after,
+            )
+        state.count_scan_after = page.next_after
+        state.next_count_at = asyncio.get_running_loop().time() + _COUNT_CHECK_INTERVAL_SECONDS
+        admitted: list[str] = []
+        async with self._database.transaction() as connection:
+            await self._leases.require_fence(connection, fence)
+            for scope in page.ready:
+                if scope in state.queued or scope in state.running or scope in state.retries:
+                    continue
+                intent = await self._intents.load(connection, scope, state.binding.binding_name, for_update=True)
+                if intent is None or intent.requested_generation > intent.handled_generation:
+                    # An accepted invocation already owns this scope.
+                    continue
+                await self._intents.request(connection, scope, state.binding.binding_name)
+                admitted.append(scope)
+        for scope in admitted:
+            self._enqueue(state, scope)
 
     async def _discover_requested(self, state: _FamilyState) -> None:
         capacity = self._fresh_capacity(state)
@@ -1060,6 +1117,8 @@ class ArtifactProcessingSupervisor:
             state.requested_after = state.scan_after = state.scan_generation = 0
             state.scan_in_progress = False
             state.discovery_pending = True
+            state.count_scan_after = None
+            state.next_count_at = 0.0
 
     async def _reap_unconfirmed_exits(self) -> None:
         for handle in tuple(self._unreaped):
@@ -1093,6 +1152,10 @@ class ArtifactProcessingSupervisor:
                 continue
             if state.next_schedule_at is not None:
                 deadlines.append(state.next_schedule_at)
+            if state.binding.source_count_threshold is not None:
+                # A count-triggered Family re-reads its pending count even when
+                # no schedule is due, so a busy scope starts without waiting.
+                deadlines.append(max(now + _COUNT_CHECK_INTERVAL_SECONDS, state.next_count_at))
             if state.discovery_pending or state.scan_in_progress or not state.reconcile_complete or state.degraded:
                 deadlines.append(max(now, state.next_discovery_at))
         return None if not deadlines else max(0.001, min(deadlines) - now)
