@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+import math
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from itertools import chain
 from typing import TypeVar
@@ -26,6 +28,7 @@ from powercontext.artifacts import ArtifactAddress, ArtifactRef
 from powercontext.builtin.artifacts.experience import Experience, ExperienceSearchHit, render_experience
 from powercontext.builtin.artifacts.memory.models import MemoryCitation, MemoryHit
 from powercontext.builtin.artifacts.profile.models import Profile
+from powercontext.builtin.artifacts.search import analyze_fts_query, analyze_text
 from powercontext.builtin.artifacts.topic_memory import TopicMemory, TopicMemorySearchHit
 from powercontext.builtin.runtime.errors import PreparedContextInvariantError
 from powercontext.builtin.runtime.models import PrepareContextRequest, PreparedContext
@@ -46,6 +49,40 @@ _MIN_TRUNCATED_CONTENT_BYTES = 64
 _ELLIPSIS = "…"
 _BEGIN_MARKER = "BEGIN_POWERCONTEXT_PREPARED_CONTEXT_V1"
 _END_MARKER = "END_POWERCONTEXT_PREPARED_CONTEXT_V1"
+# The retrieval rank of the best candidate contributes to a span's score, so a
+# span from a strongly recalled entry wins over an equally relevant span from a
+# weaker one. The bonus stays below the query coverage range on purpose.
+_EVIDENCE_ENTRY_BONUS = 0.25
+# Words that end in a period without ending a sentence. Splitting after them
+# would cut one evidence sentence into two pieces that no longer cover it.
+_EVIDENCE_ABBREVIATIONS = frozenset({
+    "al",
+    "approx",
+    "ca",
+    "cf",
+    "dr",
+    "e.g",
+    "eq",
+    "etc",
+    "fig",
+    "i.e",
+    "inc",
+    "ltd",
+    "mr",
+    "ms",
+    "no",
+    "prof",
+    "ref",
+    "st",
+    "vs",
+})
+# Characters that end a line but are not escaped by ``json.dumps``. Leaving them
+# raw would split the rendered envelope over several lines.
+_LINE_BREAK_ESCAPES = {
+    "\x85": "\\u0085",
+    "\u2028": "\\u2028",
+    "\u2029": "\\u2029",
+}
 _Item = TypeVar("_Item")
 
 
@@ -100,12 +137,16 @@ class PreparedContextBuild:
     **not** a field here: ``ScopedContextApplication._prepare`` returns ``build.context`` and
     discards the rest, so such a field would have no production observer. The trace is
     delivered through the Runtime's optional ``RecallEffortSink`` instead.
+
+    ``fragments`` reports the literal spans delivered by evidence selection. It is empty for
+    the ordinary prepare path, where whole entries are delivered instead of spans.
     """
 
     context: PreparedContext
     origins: tuple[PreparedContextOrigin, ...]
     omissions: PreparedContextOmissions = PreparedContextOmissions()
     code_origins: tuple[CodeEvidenceRef, ...] = ()
+    fragments: tuple[PreparedContextFragment, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -117,7 +158,55 @@ class MemoryEntryAddress:
     entry_version_id: str
 
 
+@dataclass(frozen=True)
+class PreparedContextFragment:
+    """One literal span of one exact Memory entry version.
+
+    ``text`` is exactly ``entry.text[start:end]`` of the addressed entry version, so a reader
+    can re-read the delivered evidence from the Memory entry the fragment cites instead of
+    trusting this build. ``start`` and ``end`` are half-open character offsets into that
+    entry's text.
+    """
+
+    address: MemoryEntryAddress
+    start: int
+    end: int
+    text: str
+
+
 PreparedContextOrigin = MemoryCitation | ArtifactRef | MemoryEntryAddress | ArtifactAddress
+
+
+@dataclass(frozen=True)
+class _PreparedSelection:
+    """One pure selection pass: the rendered content and everything it cites."""
+
+    content: str | None = None
+    origins: tuple[PreparedContextOrigin, ...] = ()
+    omissions: PreparedContextOmissions = PreparedContextOmissions()
+    fragments: tuple[PreparedContextFragment, ...] = ()
+
+
+@dataclass(frozen=True)
+class _EvidenceEntry:
+    """One recalled Memory entry version offered as evidence."""
+
+    address: MemoryEntryAddress
+    text: str
+    rank: int = 0
+
+
+@dataclass(frozen=True)
+class _EvidenceSpan:
+    """One scored span inside one exact Memory entry version."""
+
+    address: MemoryEntryAddress
+    start: int
+    end: int
+    text: str
+    score: float
+    entry_rank: int
+    matched: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -235,7 +324,7 @@ class PreparedContextBuilder:
         if sum(len(candidates.hits) for candidates in experience_candidates) > self.experience_candidate_limit:
             raise PreparedContextInvariantError("experience-candidate-limit")
 
-        content, origins, omissions = self._select_entries(
+        selection = self._select_entries(
             request=request,
             current_scope_id=current_scope_id,
             memory_candidates=memory_candidates,
@@ -243,8 +332,9 @@ class PreparedContextBuilder:
             profile_candidates=profile_candidates,
             topic_memory_hits=topic_memory_hits,
         )
-        if content is None:
-            return PreparedContextBuild(context=self.empty(), origins=(), omissions=omissions)
+        if selection.content is None:
+            return PreparedContextBuild(context=self.empty(), origins=(), omissions=selection.omissions)
+        content = selection.content
         content_bytes = len(content.encode("utf-8"))
         # The assembly path is bounded by construction (every fitted item is measured against
         # `max_bytes`), so the ceiling check belongs to the non-assembly renderer only.
@@ -252,8 +342,9 @@ class PreparedContextBuilder:
             raise PreparedContextInvariantError("output-budget")
         return PreparedContextBuild(
             context=PreparedContext(status="ready", content=content, content_bytes=content_bytes),
-            origins=origins,
-            omissions=omissions,
+            origins=selection.origins,
+            omissions=selection.omissions,
+            fragments=selection.fragments,
         )
 
     def probe_budget(
@@ -277,7 +368,7 @@ class PreparedContextBuilder:
         counters because both go through :meth:`_select_entries`.
         """
 
-        content, origins, omissions = self._select_entries(
+        selection = self._select_entries(
             request=request,
             current_scope_id=current_scope_id,
             memory_candidates=memory_candidates,
@@ -285,12 +376,12 @@ class PreparedContextBuilder:
             profile_candidates=profile_candidates,
             topic_memory_hits=topic_memory_hits,
         )
-        content_bytes = 0 if content is None else len(content.encode("utf-8"))
+        content_bytes = 0 if selection.content is None else len(selection.content.encode("utf-8"))
         return RecallBudgetView(
             max_bytes=request.max_bytes,
-            delivered_items=len(origins),
-            truncated_items=omissions.truncated_items,
-            dropped_items=omissions.dropped_items,
+            delivered_items=len(selection.origins),
+            truncated_items=selection.omissions.truncated_items,
+            dropped_items=selection.omissions.dropped_items,
             unused_bytes=max(0, request.max_bytes - content_bytes),
         )
 
@@ -303,15 +394,22 @@ class PreparedContextBuilder:
         topic_memory_hits: Sequence[TopicMemorySearchHit],
         experience_candidates: Sequence[PreparedExperienceCandidates],
         profile_candidates: Sequence[PreparedProfileCandidate],
-    ) -> tuple[str | None, tuple[PreparedContextOrigin, ...], PreparedContextOmissions]:
+    ) -> _PreparedSelection:
         """Run one complete pure selection pass and render it.
 
-        Returns ``(content, origins, omissions)``; ``content`` is ``None`` exactly when nothing
-        was selected, which is the empty-result case for both paths. This is the single
-        selection path shared by :meth:`build_scopes_result` and :meth:`probe_budget`, so the
-        probe's counters always describe the selection the build would actually perform.
+        Returns the rendered content together with the origins and fragments it cites;
+        ``content`` is ``None`` exactly when nothing was selected, which is the empty-result
+        case for both paths. This is the single selection path shared by
+        :meth:`build_scopes_result` and :meth:`probe_budget`, so the probe's counters always
+        describe the selection the build would actually perform.
         """
 
+        if request.evidence_selection:
+            return self._select_evidence(
+                request=request,
+                current_scope_id=current_scope_id,
+                memory_candidates=memory_candidates,
+            )
         if request.assembly is not None:
             return self._select_text(
                 request,
@@ -344,8 +442,47 @@ class PreparedContextBuilder:
         )[: self.experience_entry_limit]
         entries, omissions = self._fit_entries(request, memory_entries, topic_memory_entries, experience_entries)
         if not entries:
-            return None, (), omissions
-        return _render(entries), tuple(entry.origin for entry in entries), omissions
+            return _PreparedSelection(omissions=omissions)
+        return _PreparedSelection(
+            content=_render(entries),
+            origins=tuple(entry.origin for entry in entries),
+            omissions=omissions,
+        )
+
+    def _select_evidence(
+        self,
+        *,
+        request: PrepareContextRequest,
+        current_scope_id: str | None,
+        memory_candidates: Sequence[PreparedMemoryCandidates],
+    ) -> _PreparedSelection:
+        """Select the literal Memory spans that answer one query within one byte budget.
+
+        Evidence selection keeps the original characters of the recalled entries: every
+        delivered fragment reports the character range it occupies in the entry version it
+        cites, so a reader can re-read the same evidence from the Memory entry itself. The
+        mode reads Memory candidates only; Code, Topic Memory and Experience are not part of
+        this delivery contract. It replaces the Markdown assembly output, because that
+        format cannot express the character range of a fragment.
+        """
+
+        query_terms = _evidence_query_terms(request.query)
+        spans = _evidence_spans(memory_candidates, current_scope_id, query_terms)
+        if not spans:
+            return _PreparedSelection()
+        selected = _fit_evidence(spans, max_bytes=request.max_bytes)
+        if not selected:
+            return _PreparedSelection(omissions=PreparedContextOmissions(dropped_items=len(spans)))
+        fragments = tuple(
+            PreparedContextFragment(address=span.address, start=span.start, end=span.end, text=span.text)
+            for span in selected
+        )
+        return _PreparedSelection(
+            content=_render_evidence(selected),
+            origins=tuple(fragment.address for fragment in fragments),
+            omissions=PreparedContextOmissions(dropped_items=len(spans) - len(selected)),
+            fragments=fragments,
+        )
 
     def _select_text(
         self,
@@ -356,7 +493,7 @@ class PreparedContextBuilder:
         experience_candidates: Sequence[PreparedExperienceCandidates],
         profile_candidates: Sequence[PreparedProfileCandidate],
         topic_memory_hits: Sequence[TopicMemorySearchHit],
-    ) -> tuple[str | None, tuple[PreparedContextOrigin, ...], PreparedContextOmissions]:
+    ) -> _PreparedSelection:
         assembly = request.assembly
         if assembly is None:
             raise PreparedContextInvariantError("text-assembly-missing")
@@ -429,9 +566,9 @@ class PreparedContextBuilder:
             dropped_no_fitting_truncation=dropped_no_fitting_truncation,
         )
         if not included:
-            return None, (), omissions
+            return _PreparedSelection(omissions=omissions)
         content = render_context_text(included, assembly)
-        return content, tuple(origins), omissions
+        return _PreparedSelection(content=content, origins=tuple(origins), omissions=omissions)
 
     def _profile_entries(self, candidates: Sequence[PreparedProfileCandidate]) -> tuple[_PreparedContextEntry, ...]:
         entries = []
@@ -728,3 +865,367 @@ def _truncate_utf8(text: str, byte_budget: int) -> str:
     prefix_budget = byte_budget - len(_ELLIPSIS.encode("utf-8"))
     encoded_prefix = text.encode("utf-8")[:prefix_budget]
     return f"{encoded_prefix.decode('utf-8', errors='ignore')}{_ELLIPSIS}"
+
+
+def _evidence_query_terms(query: str) -> tuple[str, ...]:
+    """Return the distinct lexical terms one query asks for.
+
+    The query is analyzed with the same Analyzer the retrieval stage uses, so a
+    span is matched on the terms the search itself would have matched it on.
+    """
+
+    terms = set(analyze_fts_query(query).split())
+    if not terms:
+        terms = set(analyze_text(query).split())
+    return tuple(sorted(terms))
+
+
+def _evidence_spans(
+    memory_candidates: Sequence[PreparedMemoryCandidates],
+    current_scope_id: str | None,
+    query_terms: tuple[str, ...],
+) -> tuple[_EvidenceSpan, ...]:
+    """Score every sentence span of the recalled Memory entries against one query.
+
+    The spans cover each entry's text without gaps, so a span late in a document
+    is scored exactly like a span at its front and can still be delivered.
+    """
+
+    entries = _evidence_entries(memory_candidates, current_scope_id)
+    frequency = _document_frequency(entries)
+    spans: list[_EvidenceSpan] = []
+    for entry in entries:
+        for start, end in _segment_spans(entry.text):
+            text = entry.text[start:end]
+            matched = _matched_terms(query_terms, text)
+            spans.append(
+                _EvidenceSpan(
+                    address=entry.address,
+                    start=start,
+                    end=end,
+                    text=text,
+                    score=_span_score(matched, query_terms, frequency, len(entries), entry.rank),
+                    entry_rank=entry.rank,
+                    matched=matched,
+                )
+            )
+    return tuple(sorted(spans, key=lambda span: (-span.score, span.entry_rank, span.start)))
+
+
+def _evidence_entries(
+    memory_candidates: Sequence[PreparedMemoryCandidates],
+    current_scope_id: str | None,
+) -> tuple[_EvidenceEntry, ...]:
+    """Read the recalled Memory entries, keeping every Scope's identity separate."""
+
+    groups: list[list[_EvidenceEntry]] = []
+    for candidates in memory_candidates:
+        if candidates.hits and candidates.memory_ref is None:
+            raise PreparedContextInvariantError("memory-ref-missing")
+        scope_id = candidates.scope_id or current_scope_id or ""
+        seen: set[tuple[str, str]] = set()
+        entries: list[_EvidenceEntry] = []
+        for hit in candidates.hits:
+            if hit.memory_ref != candidates.memory_ref:
+                raise PreparedContextInvariantError("memory-ref-mismatch")
+            key = (hit.entry_id, hit.entry_version_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            if not hit.entry_id.strip() or not hit.entry_version_id.strip() or not hit.text.strip():
+                continue
+            if not scope_id:
+                # An entry without a Scope cannot be addressed, so it cannot be cited.
+                continue
+            entries.append(
+                _EvidenceEntry(
+                    address=MemoryEntryAddress(
+                        memory=ArtifactAddress(scope_id=scope_id, artifact=hit.memory_ref),
+                        entry_id=hit.entry_id,
+                        entry_version_id=hit.entry_version_id,
+                    ),
+                    text=hit.text,
+                )
+            )
+        groups.append(entries)
+    ordered = _interleave_groups(tuple(groups))
+    return tuple(replace(entry, rank=index) for index, entry in enumerate(ordered))
+
+
+def _document_frequency(entries: Sequence[_EvidenceEntry]) -> dict[str, int]:
+    """Count how many candidate entries carry each lexical term."""
+
+    frequency: dict[str, int] = {}
+    for entry in entries:
+        for term in set(analyze_text(entry.text).split()):
+            frequency[term] = frequency.get(term, 0) + 1
+    return frequency
+
+
+def _matched_terms(query_terms: tuple[str, ...], text: str) -> tuple[str, ...]:
+    """Return the query terms one span actually carries."""
+
+    if not query_terms:
+        return ()
+    terms = set(analyze_text(text).split())
+    if not terms:
+        return ()
+    return tuple(term for term in query_terms if any(_term_matches(term, candidate) for candidate in terms))
+
+
+def _term_matches(query_term: str, text_term: str) -> bool:
+    """Match one query term against one text term, allowing a shared stem prefix."""
+
+    if query_term == text_term:
+        return True
+    if _is_synthetic_term(query_term) or _is_synthetic_term(text_term):
+        return False
+    if len(query_term) >= 4 and text_term.startswith(query_term):
+        return True
+    return len(text_term) >= 4 and query_term.startswith(text_term)
+
+
+def _is_synthetic_term(term: str) -> bool:
+    """Report whether one Analyzer term is a CJK unigram or bigram projection."""
+
+    return term.startswith(("u_", "b_"))
+
+
+def _span_score(
+    matched: tuple[str, ...],
+    query_terms: tuple[str, ...],
+    frequency: Mapping[str, int],
+    entry_count: int,
+    entry_rank: int,
+) -> float:
+    """Score one span by the query terms it carries, weighted by how rare they are."""
+
+    total = sum(_term_weight(term, frequency, entry_count) for term in query_terms)
+    coverage = 0.0
+    if total > 0.0:
+        coverage = sum(_term_weight(term, frequency, entry_count) for term in matched) / total
+    return coverage + _EVIDENCE_ENTRY_BONUS / (1 + entry_rank)
+
+
+def _term_weight(term: str, frequency: Mapping[str, int], entry_count: int) -> float:
+    """Weight one query term by how few of the candidate entries carry it."""
+
+    documents = frequency.get(term, 0)
+    return math.log(1.0 + (entry_count - documents + 0.5) / (documents + 0.5))
+
+
+def _segment_spans(text: str) -> tuple[tuple[int, int], ...]:
+    """Split one entry text into sentence spans that keep the original characters.
+
+    The spans cover the text without gaps or overlaps, so merging neighbouring
+    spans reproduces the original text exactly.
+    """
+
+    boundaries = [0]
+    index = 0
+    length = len(text)
+    while index < length:
+        character = text[index]
+        if character in ".!?" and _is_sentence_end(text, index):
+            end = index + 1
+            while end < length and text[end].isspace():
+                end += 1
+            # A lower-case continuation belongs to the sentence that just ended.
+            if end < length and not text[end].islower():
+                boundaries.append(end)
+            index = end
+            continue
+        if character == "\n":
+            end = index
+            while end < length and text[end].isspace():
+                end += 1
+            if end < length:
+                boundaries.append(end)
+            index = end
+            continue
+        index += 1
+    spans: list[tuple[int, int]] = []
+    for position, start in enumerate(boundaries):
+        end = boundaries[position + 1] if position + 1 < len(boundaries) else length
+        if end > start:
+            spans.append((start, end))
+    return tuple(spans)
+
+
+def _is_sentence_end(text: str, index: int) -> bool:
+    """Report whether the punctuation at one position ends a sentence."""
+
+    if text[index] != ".":
+        return True
+    if text[index + 1 : index + 2].isdigit():
+        return False
+    start = index
+    while start > 0 and (text[start - 1].isalpha() or text[start - 1] == "."):
+        start -= 1
+    word = text[start:index]
+    if "." in word:
+        return False
+    bare = word.lower()
+    if bare in _EVIDENCE_ABBREVIATIONS:
+        return False
+    return not (len(bare) == 1 and word.isupper())
+
+
+def _fit_evidence(spans: Sequence[_EvidenceSpan], *, max_bytes: int) -> tuple[_EvidenceSpan, ...]:
+    """Take the most relevant spans that fit the complete output budget.
+
+    The budget covers the whole rendered output — trust policy, envelope markers,
+    JSON, citations and body text — so every candidate is measured against the
+    rendered bytes and never against its own text length.
+    """
+
+    selected: list[_EvidenceSpan] = []
+    taken: set[tuple[int, int]] = set()
+    for span in spans:
+        if not span.matched:
+            continue
+        if _rendered_evidence_bytes((*selected, span)) <= max_bytes:
+            selected.append(span)
+            taken.add((span.entry_rank, span.start))
+    if not selected:
+        selected = _fit_evidence_windows(spans, max_bytes=max_bytes)
+        taken = {(span.entry_rank, span.start) for span in selected}
+    if not selected:
+        return ()
+    for candidate in _evidence_expansion(spans, selected, taken):
+        if _rendered_evidence_bytes((*selected, candidate)) <= max_bytes:
+            selected.append(candidate)
+            taken.add((candidate.entry_rank, candidate.start))
+    return _merge_evidence_spans(selected)
+
+
+def _fit_evidence_windows(spans: Sequence[_EvidenceSpan], *, max_bytes: int) -> list[_EvidenceSpan]:
+    """Take the region around the query terms when no whole sentence fits the budget."""
+
+    selected: list[_EvidenceSpan] = []
+    for span in spans:
+        if not span.matched:
+            continue
+        window = _focus_window(span)
+        if window is None:
+            continue
+        start, end = window
+        candidate = replace(
+            span,
+            start=start,
+            end=end,
+            text=span.text[start - span.start : end - span.start],
+        )
+        if _rendered_evidence_bytes((*selected, candidate)) <= max_bytes:
+            selected.append(candidate)
+    return selected
+
+
+def _focus_window(span: _EvidenceSpan) -> tuple[int, int] | None:
+    """Return the region of one span that carries the matched query terms."""
+
+    terms = [term for term in span.matched if not _is_synthetic_term(term)]
+    if not terms:
+        return None
+    pattern = re.compile("|".join(re.escape(term) for term in terms), re.IGNORECASE)
+    matches = list(pattern.finditer(span.text))
+    if not matches:
+        return None
+    return matches[0].start(), matches[-1].end()
+
+
+def _evidence_expansion(
+    spans: Sequence[_EvidenceSpan],
+    selected: Sequence[_EvidenceSpan],
+    taken: set[tuple[int, int]],
+) -> tuple[_EvidenceSpan, ...]:
+    """Propose the spans that extend the selected evidence: neighbours first.
+
+    A claim's evidence often continues in the sentence next to the one that carries
+    the query terms, so the neighbour of a selected span is offered before any
+    further span of the best-ranked entry.
+    """
+
+    neighbours: list[_EvidenceSpan] = []
+    fill: list[_EvidenceSpan] = []
+    best_rank = min((span.entry_rank for span in selected), default=0)
+    for span in spans:
+        if (span.entry_rank, span.start) in taken:
+            continue
+        if _is_neighbour(span, selected):
+            neighbours.append(span)
+        elif span.entry_rank == best_rank:
+            fill.append(span)
+    return (*neighbours, *fill)
+
+
+def _is_neighbour(span: _EvidenceSpan, selected: Sequence[_EvidenceSpan]) -> bool:
+    """Report whether one span sits directly next to a selected span."""
+
+    return any(
+        span.entry_rank == other.entry_rank and (span.start == other.end or span.end == other.start)
+        for other in selected
+    )
+
+
+def _merge_evidence_spans(spans: Sequence[_EvidenceSpan]) -> tuple[_EvidenceSpan, ...]:
+    """Merge spans that touch inside the same entry version into one fragment."""
+
+    merged: list[_EvidenceSpan] = []
+    for span in sorted(spans, key=lambda item: (item.entry_rank, item.start)):
+        if merged:
+            previous = merged[-1]
+            if previous.address == span.address and span.start <= previous.end:
+                overlap = previous.end - span.start
+                merged[-1] = replace(
+                    previous,
+                    end=max(previous.end, span.end),
+                    text=previous.text + (span.text[overlap:] if overlap > 0 else span.text),
+                    score=max(previous.score, span.score),
+                    matched=tuple(sorted(set(previous.matched) | set(span.matched))),
+                )
+                continue
+        merged.append(span)
+    return tuple(merged)
+
+
+def _render_evidence(spans: Sequence[_EvidenceSpan]) -> str:
+    """Render the selected fragments inside the prepared-context envelope."""
+
+    envelope = {
+        "trust": "untrusted_history",
+        "items": [_render_evidence_item(span) for span in spans],
+    }
+    encoded = _escape_line_breaks(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")))
+    return "\n\n".join((TRUST_POLICY, f"{_BEGIN_MARKER}\n{encoded}\n{_END_MARKER}"))
+
+
+def _render_evidence_item(span: _EvidenceSpan) -> dict[str, object]:
+    """Render one fragment with the citation that identifies its original version."""
+
+    address = span.address
+    return {
+        "citation": {
+            "scope_id": address.memory.scope_id,
+            "memory_ref": address.memory.artifact.model_dump(mode="json"),
+            "entry_id": address.entry_id,
+            "entry_version_id": address.entry_version_id,
+        },
+        "content": span.text,
+        "start": span.start,
+        "end": span.end,
+    }
+
+
+def _rendered_evidence_bytes(spans: Sequence[_EvidenceSpan]) -> int:
+    """Return the UTF-8 byte count of the complete rendered evidence output."""
+
+    return len(_render_evidence(_merge_evidence_spans(spans)).encode("utf-8"))
+
+
+def _escape_line_breaks(value: str) -> str:
+    """Keep one rendered item on one line without changing its decoded text."""
+
+    for character, escape in _LINE_BREAK_ESCAPES.items():
+        value = value.replace(character, escape)
+    return value
