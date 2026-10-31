@@ -1,0 +1,28 @@
+{
+  "task_id": "DEMO-1",
+  "target": "orderflow/filters.py",
+  "minimax": {
+    "model": "MiniMax-M3",
+    "base_url": "https://agent.minimax.cn/mavis/api/v1/llm/v1",
+    "prompt_chars": 7223,
+    "response_chars": 1677,
+    "elapsed_ms": 2353,
+    "usage": {
+      "input_tokens": 1,
+      "output_tokens": 367,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 2128,
+      "service_tier": "standard"
+    }
+  },
+  "diff_bytes": 1515,
+  "applied": true,
+  "tests": {
+    "command": "D:\\python.exe -m pytest C:\\Users\\tangyu\\.minimax\\sessions\\mvs_7da3a72fc1ed4cf99b34cebb29c715cf\\workspace\\minimax\\demo\\tests -q --tb=short",
+    "exit_code": 0,
+    "passed": 12,
+    "failed": 0
+  },
+  "state_revision": 1,
+  "artifacts": "artifacts"
+}

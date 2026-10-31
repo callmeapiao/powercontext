@@ -1,0 +1,14 @@
+{
+  "model": "MiniMax-M3",
+  "base_url": "https://agent.minimax.cn/mavis/api/v1/llm/v1",
+  "prompt_chars": 7223,
+  "response_chars": 1677,
+  "elapsed_ms": 2353,
+  "usage": {
+    "input_tokens": 1,
+    "output_tokens": 367,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 2128,
+    "service_tier": "standard"
+  }
+}

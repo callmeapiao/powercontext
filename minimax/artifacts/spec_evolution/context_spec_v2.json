@@ -1,0 +1,163 @@
+{
+  "task_id": "EVOLVE",
+  "description": "给 filter_orders 增加 channel 渠道筛选条件，需要支持 mini_program 渠道",
+  "keywords": [
+    "filter_orders",
+    "channel",
+    "mini_program",
+    "给",
+    "增加",
+    "渠道",
+    "道筛",
+    "筛选",
+    "选条",
+    "条件",
+    "需要",
+    "要支"
+  ],
+  "applicable_specs": [
+    {
+      "key": "SPEC-001@1",
+      "spec_id": "SPEC-001",
+      "version": "1",
+      "title": "订单筛选基本语义",
+      "kind": "spec",
+      "status": "active",
+      "scope": "orderflow.filter_orders",
+      "body": "`filter_orders` 必须保持\"全部条件同时满足\"的语义：任何给定条件不满足时，该订单被排除。\n\n- 未给定 `status` 时不按状态过滤。\n- 未给定 `min_amount` 时不按金额过滤。\n- 过滤结果保持输入顺序。\n- 输入为空集合时返回空列表。\n\n这些行为在新增任何筛选条件后仍然必须成立，属于回归范围。",
+      "source_path": "specs/SPEC-001-order-status.md",
+      "superseded_by": null
+    },
+    {
+      "key": "SPEC-002@2",
+      "spec_id": "SPEC-002",
+      "version": "2",
+      "title": "渠道筛选条件",
+      "kind": "spec",
+      "status": "active",
+      "scope": "orderflow.filter_orders",
+      "body": "`filter_orders` 需要支持按渠道筛选，参数名为 `channel`。\n\n- 渠道取值扩展为 `app`、`web`、`mini_program` 三种，`mini_program` 为新增渠道。\n- 筛选按**大小写不敏感**进行：比较前双方都转换为小写，即传入 `MINI_PROGRAM` 与传入\n  `mini_program` 结果一致。\n- 传入 `channel=None` 表示不按渠道过滤。\n- 订单缺少 `channel` 字段时，该订单在任何渠道筛选条件下都不被选中。\n\n本版本作废 `SPEC-002@v1`，实现必须以本版本为准。",
+      "source_path": "specs/SPEC-002-channel-filter-v2.md",
+      "superseded_by": null
+    }
+  ],
+  "invalidated_specs": [
+    {
+      "key": "DECISION-001@1",
+      "spec_id": "DECISION-001",
+      "version": "1",
+      "title": "渠道匹配采用精确匹配且区分大小写",
+      "kind": "decision",
+      "status": "superseded",
+      "scope": "orderflow.filter_orders",
+      "body": "为减少实现复杂度，渠道匹配统一采用精确匹配且区分大小写：订单 `channel` 字段与传入参数\n必须逐字符相等，大小写不同视为不同渠道。\n\n该决策适用于 `app`、`web` 两种渠道。",
+      "source_path": "specs/DECISION-001-channel-matching.md",
+      "superseded_by": "SPEC-002@2"
+    },
+    {
+      "key": "SPEC-002@1",
+      "spec_id": "SPEC-002",
+      "version": "1",
+      "title": "渠道筛选条件",
+      "kind": "spec",
+      "status": "superseded",
+      "scope": "orderflow.filter_orders",
+      "body": "`filter_orders` 需要支持按渠道筛选，参数名为 `channel`。\n\n- 渠道取值目前只有 `app` 与 `web` 两种。\n- 筛选按**精确匹配**进行：订单的 `channel` 字段必须与传入值完全相等。\n- 传入 `channel=None` 表示不按渠道过滤。\n\n本版本为初始版本，后续如有语义调整会发布新版本并作废本版本。",
+      "source_path": "specs/SPEC-002-channel-filter-v1.md",
+      "superseded_by": "SPEC-002@2"
+    }
+  ],
+  "code_files": [
+    {
+      "path": "orderflow/filters.py",
+      "language": "python",
+      "content": "\"\"\"Order filtering rules for the orderflow service.\"\"\"\n\nfrom __future__ import annotations\n\nfrom collections.abc import Iterable, Mapping\nfrom typing import Any\n\n#: Statuses an order may hold.\nORDER_STATUSES = (\"pending\", \"paid\", \"shipped\", \"cancelled\")\n\n\ndef filter_orders(\n    orders: Iterable[Mapping[str, Any]],\n    status: str | None = None,\n    min_amount: float | None = None,\n) -> list[Mapping[str, Any]]:\n    \"\"\"Return the orders that match every supplied filter.\n\n    Args:\n        orders: order records to filter. Each record may carry ``id``,\n            ``status``, ``amount`` and ``channel`` keys.\n        status: keep only orders whose status equals this value.\n        min_amount: keep only orders whose amount is greater than or equal\n            to this value.\n\n    Returns:\n        The matching order records, in their original order.\n    \"\"\"\n\n    selected: list[Mapping[str, Any]] = []\n    for order in orders:\n        if status is not None and order.get(\"status\") != status:\n            continue\n        if min_amount is not None and float(order.get(\"amount\", 0)) < min_amount:\n            continue\n        selected.append(order)\n    return selected\n",
+      "content_hash": "e4d20525d93634ae01b7884e71c903de0e2396f4ca959f876e8ca3613fa5f487"
+    }
+  ],
+  "symbols": [
+    {
+      "path": "orderflow/filters.py",
+      "symbol": "filter_orders",
+      "kind": "function",
+      "signature": "filter_orders(orders, status, min_amount)",
+      "body": "def filter_orders(\n    orders: Iterable[Mapping[str, Any]],\n    status: str | None = None,\n    min_amount: float | None = None,\n) -> list[Mapping[str, Any]]:\n    \"\"\"Return the orders that match every supplied filter.\n\n    Args:\n        orders: order records to filter. Each record may carry ``id``,\n            ``status``, ``amount`` and ``channel`` keys.\n        status: keep only orders whose status equals this value.\n        min_amount: keep only orders whose amount is greater than or equal\n            to this value.\n\n    Returns:\n        The matching order records, in their original order.\n    \"\"\"\n\n    selected: list[Mapping[str, Any]] = []\n    for order in orders:\n        if status is not None and order.get(\"status\") != status:\n            continue\n        if min_amount is not None and float(order.get(\"amount\", 0)) < min_amount:\n            continue\n        selected.append(order)\n    return selected",
+      "line_start": 12
+    }
+  ],
+  "tests": [
+    {
+      "path": "tests/test_filters_regression.py",
+      "test_name": "test_filter_orders_by_status",
+      "kind": "regression",
+      "body": "def test_filter_orders_by_status():\n    selected = filter_orders(ORDERS, status=\"paid\")\n    assert [order[\"id\"] for order in selected] == [1]"
+    },
+    {
+      "path": "tests/test_filters_regression.py",
+      "test_name": "test_filter_orders_without_filters_returns_everything",
+      "kind": "regression",
+      "body": "def test_filter_orders_without_filters_returns_everything():\n    selected = filter_orders(ORDERS)\n    assert [order[\"id\"] for order in selected] == [1, 2, 3]"
+    },
+    {
+      "path": "tests/test_filters_regression.py",
+      "test_name": "test_filter_orders_unknown_status_returns_empty",
+      "kind": "regression",
+      "body": "def test_filter_orders_unknown_status_returns_empty():\n    assert filter_orders(ORDERS, status=\"unknown\") == []"
+    },
+    {
+      "path": "tests/test_filters_regression.py",
+      "test_name": "test_filter_orders_by_min_amount",
+      "kind": "regression",
+      "body": "def test_filter_orders_by_min_amount():\n    selected = filter_orders(ORDERS, min_amount=20.0)\n    assert [order[\"id\"] for order in selected] == [2, 3]"
+    },
+    {
+      "path": "tests/test_filters_regression.py",
+      "test_name": "test_filter_orders_empty_input",
+      "kind": "regression",
+      "body": "def test_filter_orders_empty_input():\n    assert filter_orders([], status=\"paid\") == []"
+    },
+    {
+      "path": "tests/test_filters_regression.py",
+      "test_name": "test_filter_orders_combines_status_and_amount",
+      "kind": "regression",
+      "body": "def test_filter_orders_combines_status_and_amount():\n    selected = filter_orders(ORDERS, status=\"paid\", min_amount=5.0)\n    assert [order[\"id\"] for order in selected] == [1]"
+    },
+    {
+      "path": "tests/test_filters_target.py",
+      "test_name": "test_filter_orders_by_channel",
+      "kind": "target",
+      "body": "def test_filter_orders_by_channel():\n    \"\"\"Orders are filtered by the channel they belong to.\"\"\"\n\n    selected = filter_orders(ORDERS, channel=\"app\")\n    assert [order[\"id\"] for order in selected] == [1]\n\n    selected = filter_orders(ORDERS, channel=\"mini_program\")\n    assert [order[\"id\"] for order in selected] == [2]"
+    },
+    {
+      "path": "tests/test_filters_target.py",
+      "test_name": "test_filter_orders_channel_accepts_new_channel_value",
+      "kind": "target",
+      "body": "def test_filter_orders_channel_accepts_new_channel_value():\n    \"\"\"The ``mini_program`` channel is a valid channel value.\"\"\"\n\n    selected = filter_orders(ORDERS, channel=\"mini_program\")\n    assert selected, \"mini_program is a documented channel and must select orders\""
+    },
+    {
+      "path": "tests/test_filters_target.py",
+      "test_name": "test_filter_orders_skips_orders_without_channel",
+      "kind": "target",
+      "body": "def test_filter_orders_skips_orders_without_channel():\n    \"\"\"Orders without a channel field never match a channel filter.\"\"\"\n\n    orders = [{\"id\": 9, \"status\": \"paid\", \"amount\": 5.0}]\n    assert filter_orders(orders, channel=\"app\") == []"
+    },
+    {
+      "path": "tests/test_filters_target.py",
+      "test_name": "test_filter_orders_channel_is_case_insensitive",
+      "kind": "target",
+      "body": "def test_filter_orders_channel_is_case_insensitive():\n    \"\"\"Channel comparison ignores case, as required by SPEC-002 v2.\"\"\"\n\n    selected = filter_orders(ORDERS, channel=\"MINI_PROGRAM\")\n    assert [order[\"id\"] for order in selected] == [2]"
+    },
+    {
+      "path": "tests/test_filters_target.py",
+      "test_name": "test_filter_orders_channel_combines_with_other_filters",
+      "kind": "target",
+      "body": "def test_filter_orders_channel_combines_with_other_filters():\n    \"\"\"Channel filtering combines with the existing filters.\"\"\"\n\n    selected = filter_orders(ORDERS, status=\"paid\", channel=\"app\")\n    assert [order[\"id\"] for order in selected] == [1]"
+    },
+    {
+      "path": "tests/test_filters_target.py",
+      "test_name": "test_filter_orders_channel_none_keeps_every_order",
+      "kind": "target",
+      "body": "def test_filter_orders_channel_none_keeps_every_order():\n    \"\"\"``channel=None`` does not filter by channel.\"\"\"\n\n    selected = filter_orders(ORDERS, channel=None)\n    assert [order[\"id\"] for order in selected] == [1, 2, 3]"
+    }
+  ],
+  "state": null
+}

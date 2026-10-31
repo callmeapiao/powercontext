@@ -1,0 +1,40 @@
+......FFFFFF                                                             [100%]
+================================== FAILURES ===================================
+________________________ test_filter_orders_by_channel ________________________
+demo\tests\test_filters_target.py:25: in test_filter_orders_by_channel
+    selected = filter_orders(ORDERS, channel="app")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: filter_orders() got an unexpected keyword argument 'channel'
+____________ test_filter_orders_channel_accepts_new_channel_value _____________
+demo\tests\test_filters_target.py:35: in test_filter_orders_channel_accepts_new_channel_value
+    selected = filter_orders(ORDERS, channel="mini_program")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: filter_orders() got an unexpected keyword argument 'channel'
+_______________ test_filter_orders_channel_is_case_insensitive ________________
+demo\tests\test_filters_target.py:42: in test_filter_orders_channel_is_case_insensitive
+    selected = filter_orders(ORDERS, channel="MINI_PROGRAM")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: filter_orders() got an unexpected keyword argument 'channel'
+___________ test_filter_orders_channel_combines_with_other_filters ____________
+demo\tests\test_filters_target.py:49: in test_filter_orders_channel_combines_with_other_filters
+    selected = filter_orders(ORDERS, status="paid", channel="app")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: filter_orders() got an unexpected keyword argument 'channel'
+______________ test_filter_orders_channel_none_keeps_every_order ______________
+demo\tests\test_filters_target.py:56: in test_filter_orders_channel_none_keeps_every_order
+    selected = filter_orders(ORDERS, channel=None)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: filter_orders() got an unexpected keyword argument 'channel'
+_______________ test_filter_orders_skips_orders_without_channel _______________
+demo\tests\test_filters_target.py:64: in test_filter_orders_skips_orders_without_channel
+    assert filter_orders(orders, channel="app") == []
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: filter_orders() got an unexpected keyword argument 'channel'
+=========================== short test summary info ===========================
+FAILED demo/tests/test_filters_target.py::test_filter_orders_by_channel - Typ...
+FAILED demo/tests/test_filters_target.py::test_filter_orders_channel_accepts_new_channel_value
+FAILED demo/tests/test_filters_target.py::test_filter_orders_channel_is_case_insensitive
+FAILED demo/tests/test_filters_target.py::test_filter_orders_channel_combines_with_other_filters
+FAILED demo/tests/test_filters_target.py::test_filter_orders_channel_none_keeps_every_order
+FAILED demo/tests/test_filters_target.py::test_filter_orders_skips_orders_without_channel
+6 failed, 6 passed in 0.08s

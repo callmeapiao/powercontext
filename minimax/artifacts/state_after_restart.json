@@ -1,0 +1,64 @@
+{
+  "task_id": "DEMO-1",
+  "revision": 1,
+  "revisions": 1,
+  "state": {
+    "task_id": "DEMO-1",
+    "description": "给 filter_orders 增加 channel 渠道筛选条件，需要支持 mini_program 渠道",
+    "keywords": [
+      "filter_orders",
+      "channel",
+      "mini_program",
+      "给",
+      "增加",
+      "渠道",
+      "道筛",
+      "筛选",
+      "选条",
+      "条件",
+      "需要",
+      "要支"
+    ],
+    "active_specs": [
+      "SPEC-001@1",
+      "SPEC-002@2"
+    ],
+    "superseded_specs": [
+      "DECISION-001@1",
+      "SPEC-002@1"
+    ],
+    "target_symbols": [
+      "orderflow/filters.py::filter_orders"
+    ],
+    "code_files": [
+      "orderflow/filters.py"
+    ],
+    "test_paths": [
+      "tests/test_filters_regression.py",
+      "tests/test_filters_target.py"
+    ],
+    "done": [
+      "修改 orderflow/filters.py 并通过全部测试"
+    ],
+    "todo": [],
+    "validations": [
+      {
+        "command": "D:\\python.exe -m pytest C:\\Users\\tangyu\\.minimax\\sessions\\mvs_7da3a72fc1ed4cf99b34cebb29c715cf\\workspace\\minimax\\demo\\tests -q --tb=short",
+        "exit_code": 0,
+        "passed": 12,
+        "failed": 0,
+        "summary": "12 passed, 0 failed",
+        "recorded_at": "2026-10-30T14:14:23+00:00"
+      }
+    ],
+    "material_sources": [
+      "spec:specs/SPEC-001-order-status.md",
+      "spec:specs/SPEC-002-channel-filter-v2.md"
+    ],
+    "updated_at": "2026-10-30T14:14:23+00:00"
+  },
+  "lineage_sources": [
+    "spec:specs/SPEC-001-order-status.md",
+    "spec:specs/SPEC-002-channel-filter-v2.md"
+  ]
+}
