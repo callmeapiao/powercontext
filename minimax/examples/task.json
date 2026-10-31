@@ -1,0 +1,112 @@
+{
+  "task_id": "DEMO-1",
+  "title": "给订单筛选服务增加渠道筛选条件",
+  "business_project": "demo (orderflow)",
+  "description": "给 filter_orders 增加 channel 渠道筛选条件，需要支持 mini_program 渠道",
+  "target_file": "orderflow/filters.py",
+  "target_symbol": "filter_orders",
+  "applicable_specs": [
+    {
+      "key": "SPEC-001@1",
+      "title": "订单筛选基本语义",
+      "source": "demo/specs/SPEC-001-order-status.md",
+      "requirements": [
+        "所有给定条件必须同时满足",
+        "未给定的条件不参与过滤",
+        "结果保持输入顺序",
+        "空输入返回空列表"
+      ]
+    },
+    {
+      "key": "SPEC-002@2",
+      "title": "渠道筛选条件",
+      "source": "demo/specs/SPEC-002-channel-filter-v2.md",
+      "requirements": [
+        "参数名为 channel",
+        "渠道取值为 app / web / mini_program",
+        "比较大小写不敏感",
+        "channel=None 表示不按渠道过滤",
+        "订单缺少 channel 字段时不选中"
+      ]
+    }
+  ],
+  "invalidated_specs": [
+    {
+      "key": "SPEC-002@1",
+      "superseded_by": "SPEC-002@2",
+      "reason": "渠道取值与匹配语义已被 v2 取代"
+    },
+    {
+      "key": "DECISION-001@1",
+      "superseded_by": "SPEC-002@2",
+      "reason": "精确匹配且区分大小写的决策已被 v2 取代"
+    }
+  ],
+  "initial_data": {
+    "source_files": ["demo/orderflow/filters.py", "demo/orderflow/__init__.py"],
+    "spec_files": [
+      "demo/specs/SPEC-001-order-status.md",
+      "demo/specs/SPEC-002-channel-filter-v1.md",
+      "demo/specs/SPEC-002-channel-filter-v2.md",
+      "demo/specs/DECISION-001-channel-matching.md"
+    ],
+    "test_files": [
+      "demo/tests/test_filters_target.py",
+      "demo/tests/test_filters_regression.py"
+    ],
+    "code_snapshot_before": "snapshots/before/orderflow/filters.py",
+    "code_snapshot_after": "snapshots/after/orderflow/filters.py"
+  },
+  "test_plan": {
+    "target_tests": {
+      "file": "demo/tests/test_filters_target.py",
+      "cases": [
+        "test_filter_orders_by_channel",
+        "test_filter_orders_channel_accepts_new_channel_value",
+        "test_filter_orders_channel_is_case_insensitive",
+        "test_filter_orders_channel_combines_with_other_filters",
+        "test_filter_orders_channel_none_keeps_every_order",
+        "test_filter_orders_skips_orders_without_channel"
+      ],
+      "expected_before": "6 failed（TypeError: filter_orders() got an unexpected keyword argument 'channel'）",
+      "expected_after": "6 passed"
+    },
+    "regression_tests": {
+      "file": "demo/tests/test_filters_regression.py",
+      "cases": [
+        "test_filter_orders_by_status",
+        "test_filter_orders_by_min_amount",
+        "test_filter_orders_without_filters_returns_everything",
+        "test_filter_orders_unknown_status_returns_empty",
+        "test_filter_orders_empty_input",
+        "test_filter_orders_combines_status_and_amount"
+      ],
+      "expected_before": "6 passed",
+      "expected_after": "6 passed"
+    },
+    "fixed": "两个测试文件在修改前后完全一致，未删除断言、未跳过、未修改预期结果"
+  },
+  "steps": [
+    "python scripts/run_sample.py",
+    "或逐步执行：",
+    "  python -m ctxmod reset",
+    "  python -m ctxmod import",
+    "  python -m pytest demo/tests -q --tb=short            # 预期 6 failed, 6 passed",
+    "  python -m ctxmod context --task DEMO-1 --description \"...\" --target orderflow/filters.py",
+    "  python -m ctxmod run --task DEMO-1 --description \"...\" --target orderflow/filters.py",
+    "  python -m pytest demo/tests -q --tb=short            # 预期 12 passed",
+    "  python -m ctxmod state --task DEMO-1                 # 新进程读回状态",
+    "  python -m ctxmod verify --task DEMO-1                # 复用状态再次验证"
+  ],
+  "expected_results": {
+    "before_change": "目标功能测试失败（目标行为未实现），回归测试通过",
+    "after_change": "12 个测试全部通过",
+    "state_reuse": "重启模块后能读回任务状态，并用于后续验证",
+    "spec_evolution": "重新导入更新后的规格后，适用规格由 SPEC-001@1 + SPEC-002@2 变为 SPEC-001@1 + SPEC-002@3"
+  },
+  "reset": {
+    "runtime": "python -m ctxmod reset          # 删除 .runtime/（seekdb + 状态库）",
+    "code": "cp snapshots/before/orderflow/filters.py demo/orderflow/filters.py",
+    "full": "python scripts/run_sample.py 会自动执行以上两步，然后重跑整个流程"
+  }
+}
